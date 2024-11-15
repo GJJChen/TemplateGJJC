@@ -1,0 +1,104 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+import torch
+from torch import nn
+from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
+from pytorch_forecasting.data import TimeSeriesDataLoader
+from pytorch_lightning import Trainer
+import matplotlib.pyplot as plt
+
+# ==============================
+# Step 1: 数据准备
+# ==============================
+# 模拟二维时间序列数据
+np.random.seed(42)
+num_features = 3
+time_steps = 1000
+data = np.random.rand(num_features, time_steps) * 10
+
+# 转置为 DataFrame 格式
+time_idx = np.arange(time_steps)
+df = pd.DataFrame(data.T, columns=[f"feature_{i}" for i in range(num_features)])
+df["time_idx"] = time_idx
+df["group_id"] = 0  # 单一组序列
+df["target"] = df["feature_0"]  # 将 feature_0 作为目标列
+
+# 归一化
+scaler = MinMaxScaler()
+scaled_features = scaler.fit_transform(df[[f"feature_{i}" for i in range(num_features)]])
+df[[f"feature_{i}" for i in range(num_features)]] = scaled_features
+df["target"] = scaler.fit_transform(df[["target"]])
+
+# ==============================
+# Step 2: 数据集定义
+# ==============================
+max_encoder_length = 30  # 输入序列长度
+max_prediction_length = 10  # 输出序列长度
+
+dataset = TimeSeriesDataSet(
+    df,
+    time_idx="time_idx",
+    target="target",
+    group_ids=["group_id"],
+    max_encoder_length=max_encoder_length,
+    max_prediction_length=max_prediction_length,
+    time_varying_known_reals=[f"feature_{i}" for i in range(num_features)],
+    time_varying_unknown_reals=["target"],
+    target_normalizer="standard",
+)
+
+# 数据加载器
+train_dataset, val_dataset = dataset.split(0.8)
+train_loader = TimeSeriesDataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader = TimeSeriesDataLoader(val_dataset, batch_size=64)
+
+# ==============================
+# Step 3: 模型定义与训练
+# ==============================
+# 定义模型
+tft = TemporalFusionTransformer.from_dataset(
+    dataset,
+    learning_rate=0.01,
+    hidden_size=16,
+    attention_head_size=4,
+    dropout=0.1,
+    hidden_continuous_size=8,
+    output_size=1,
+    loss=nn.MSELoss(),
+    log_interval=10,
+    reduce_on_plateau_patience=3,
+)
+
+# 训练模型
+trainer = Trainer(
+    max_epochs=30,
+    gpus=1 if torch.cuda.is_available() else 0,
+)
+trainer.fit(
+    tft,
+    train_loader,
+    val_loader,
+)
+
+# ==============================
+# Step 4: 预测与可视化
+# ==============================
+# 获取预测值和实际值
+actuals = torch.cat([y for x, y in iter(val_loader)]).numpy()
+predictions = tft.predict(val_loader).numpy()
+
+# 逆归一化
+actuals = scaler.inverse_transform(actuals)
+predictions = scaler.inverse_transform(predictions)
+
+# 可视化对比图
+plt.figure(figsize=(12, 6))
+plt.plot(actuals[:100], label="Actuals", linestyle='-', marker='o')
+plt.plot(predictions[:100], label="Predictions", linestyle='--', marker='x')
+plt.title("Actuals vs Predictions")
+plt.xlabel("Time Steps")
+plt.ylabel("Target Value")
+plt.legend()
+plt.grid(True)
+plt.show()
